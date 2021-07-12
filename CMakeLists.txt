@@ -60,6 +60,7 @@ catkin_python_setup()
    FILES
    TransformPoses.srv
    CreateFrame.srv
+   CreateFrameAtPose.srv
    LookupTransform.srv
 )
 
