@@ -1,5 +1,5 @@
 std_msgs/String target_frame
-std_msgs/String ref_fram
+std_msgs/String ref_frame
 geometry_msgs/PoseArray poses_to_transform
 ---
 geometry_msgs/PoseArray transformed_poses
