@@ -3,8 +3,9 @@ helper functions and services to interact with the robot, and provides a lot of 
 Also offers functions that make use of Force/Torque Sensor like MoveToTouch which moves in a certain specified direction and a force is detected and then immediatly stops the robot.
 
 Used for Robothon Grand challenge (Our Team RAND-E ranked 3rd World Wide):
+[![IMAGE ALT TEXT HERE](https://img.youtube.com/vi/4QgSiGciNaM&t/0.jpg)](https://www.youtube.com/watch?v=4QgSiGciNaM&t)
 
-[Demonstration Video](https://www.youtube.com/watch?v=4QgSiGciNaM&t)
+#[Demonstration Video](https://www.youtube.com/watch?v=4QgSiGciNaM&t)
 
 Also Used for Autonomous Semi-Destructive Disassembly of Laptops:
 
