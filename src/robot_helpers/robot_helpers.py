@@ -11,6 +11,7 @@ from math import fabs
 from tf.transformations import quaternion_from_euler, euler_from_quaternion
 from abb_robot_msgs.srv import SetIOSignal, SetIOSignalRequest
 from moveit_msgs.msg import ExecuteTrajectoryActionResult
+from copy import deepcopy
 
 
 def sample_from_func(func, start, stop, number_of_points):
@@ -21,7 +22,7 @@ def sample_from_func(func, start, stop, number_of_points):
 
 
 def filter_plan(plan):
-    last_time_step = plan.joint_trajectory.points[0].time_from_start.to_sec
+    last_time_step = plan.joint_trajectory.points[0].time_from_start.to_sec()
     new_plan = RobotTrajectory()
     new_plan.joint_trajectory.header = plan.joint_trajectory.header
     new_plan.joint_trajectory.joint_names = plan.joint_trajectory.joint_names
@@ -29,9 +30,9 @@ def filter_plan(plan):
         plan.joint_trajectory.points[0])
     for i in range(1, len(plan.joint_trajectory.points)):
         point = plan.joint_trajectory.points[i]
-        if point.time_from_start.to_sec > last_time_step:
+        if point.time_from_start.to_sec() > last_time_step:
             new_plan.joint_trajectory.points.append(point)
-        last_time_step = point.time_from_start.to_sec
+        last_time_step = point.time_from_start.to_sec()
     return new_plan
 
 
@@ -101,14 +102,21 @@ class TransformServices():
 
 
 class MotionServices():
-    def __init__(self, tool_group="cutting_tool"):
+    def __init__(self, tool_group="cutting_tool", wrench_topic="ft_sensor_wrench/wrench/filtered", transform_force=False, from_frame=None, to_frame=None):
         self.move_group = MoveGroupCommander(tool_group)
+        self.ts = TransformServices()
         # TODO: Adjust quaternions of links
         self.tool_quat_base_link = [0, 1, 0, 0]
         self.tool_quat_table_link = [0.707, -0.707, 0.000, -0.000]
         self.current_force = {'z': 0, 'x': 0, 'y': 0, 'xy': 0, 'yz': 0, 'xz': 0}
         self.current_torque = {'z': 0, 'xy': 0, 'x': 0, 'y': 0}
         self.current_arm = {'x' : 0, 'y': 0, 'z': 0}
+        self.transformed_current_arm = {'x' : 0, 'y': 0, 'z': 0}
+        self.transformed_force_pub = rospy.Publisher("/wrench/transformed", WrenchStamped, queue_size=1)
+        self.transformed_force = None
+        self.do_transform_force = transform_force
+        self.to_frame = to_frame
+        self.from_frame = from_frame
         # rospy.Subscriber("ft_sensor_wrench/resultant/filtered", Float64, self.force_xy_cb)
         # rospy.Subscriber("ft_sensor_wrench/filtered_z", Float64, self.forces_cb)
         rospy.Subscriber("ft_sensor_wrench/resultant/filtered/xy",
@@ -117,7 +125,7 @@ class MotionServices():
                          Float64, self.force_yz_cb)
         rospy.Subscriber("ft_sensor_wrench/resultant/filtered/xz",
                          Float64, self.force_xz_cb)
-        rospy.Subscriber("ft_sensor_wrench/wrench/filtered",
+        rospy.Subscriber(wrench_topic,
                          WrenchStamped, self.forces_cb)
         rospy.Subscriber("/execute_trajectory/result", ExecuteTrajectoryActionResult, self.goal_status_cb)
         self.tool = rospy.ServiceProxy(
@@ -144,6 +152,45 @@ class MotionServices():
         result = self.move_group.execute(final_traj, wait_execution)
 
         return result
+    
+    def transform_force(self):
+        current_force = deepcopy(self.current_force)
+        current_torque = deepcopy(self.current_torque)
+        force_pose = Pose()
+        force_pose.position.x = current_force['x']
+        force_pose.position.y = current_force['y']
+        force_pose.position.z = current_force['z']
+        force_pose.orientation.x = 0
+        force_pose.orientation.y = 0
+        force_pose.orientation.z = 0
+        force_pose.orientation.w = 1
+        pose_arr = PoseArray()
+        pose_arr.header.frame_id = self.from_frame
+        pose_arr.poses.append(force_pose)
+        transformed_force = self.ts.transform_poses(self.to_frame, self.from_frame, pose_arr).poses[0]
+        torque_pose = Pose()
+        torque_pose.position.x = current_torque['x']
+        torque_pose.position.y = current_torque['y']
+        torque_pose.position.z = current_torque['z']
+        torque_pose.orientation.x = 0
+        torque_pose.orientation.y = 0
+        torque_pose.orientation.z = 0
+        torque_pose.orientation.w = 1
+        pose_arr = PoseArray()
+        pose_arr.header.frame_id = self.from_frame
+        pose_arr.poses.append(torque_pose)
+        transformed_torque = self.ts.transform_poses(self.to_frame, self.from_frame, pose_arr).poses[0]
+        transformed_force_dict = {'x':0,'y':0,'z':0}
+        transformed_torque_dict = {'x':0,'y':0,'z':0}
+        transformed_current_arm_dict = {'x':0,'y':0,'z':0}
+        transformed_force_dict['x'] = transformed_force.position.x
+        transformed_force_dict['y'] = transformed_force.position.y
+        transformed_force_dict['z'] = transformed_force.position.z
+        transformed_torque_dict['x'] = transformed_torque.position.x
+        transformed_torque_dict['y'] = transformed_torque.position.y
+        transformed_torque_dict['z'] = transformed_torque.position.z
+        transformed_current_arm_dict['y'] = transformed_torque_dict['y'] / (transformed_force_dict['z'] + 1e-6)
+        return transformed_force_dict, transformed_torque_dict, transformed_current_arm_dict
 
     def forces_cb(self, msg):
         self.current_force['x'] = msg.wrench.force.x
@@ -153,6 +200,17 @@ class MotionServices():
         self.current_torque['y'] = msg.wrench.torque.y
         self.current_torque['z'] = msg.wrench.torque.z
         self.current_arm['y'] = self.current_torque['y'] / (self.current_force['z'] + 1e-6)
+        if self.do_transform_force:
+            self.current_force, self.current_torque, self.current_arm = self.transform_force()
+            transformed_force_msg = WrenchStamped()
+            transformed_force_msg.header.frame_id = self.to_frame
+            transformed_force_msg.wrench.force.x = self.current_force['x']
+            transformed_force_msg.wrench.force.y = self.current_force['y']
+            transformed_force_msg.wrench.force.z = self.current_force['z']
+            transformed_force_msg.wrench.torque.x = self.current_torque['x']
+            transformed_force_msg.wrench.torque.y = self.current_torque['y']
+            transformed_force_msg.wrench.torque.z = self.current_torque['z']
+            self.transformed_force_pub.publish(transformed_force_msg)
 
     def force_xy_cb(self, msg):
         self.current_force['xy'] = msg.data
