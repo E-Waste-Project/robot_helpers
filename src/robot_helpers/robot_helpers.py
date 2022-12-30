@@ -153,13 +153,11 @@ class MotionServices():
 
         return result
     
-    def transform_force(self):
-        current_force = deepcopy(self.current_force)
-        current_torque = deepcopy(self.current_torque)
+    def transform_force(self, msg):
         force_pose = Pose()
-        force_pose.position.x = current_force['x']
-        force_pose.position.y = current_force['y']
-        force_pose.position.z = current_force['z']
+        force_pose.position.x = msg.wrench.force.x
+        force_pose.position.y = msg.wrench.force.y
+        force_pose.position.z = msg.wrench.force.z
         force_pose.orientation.x = 0
         force_pose.orientation.y = 0
         force_pose.orientation.z = 0
@@ -169,9 +167,9 @@ class MotionServices():
         pose_arr.poses.append(force_pose)
         transformed_force = self.ts.transform_poses(self.to_frame, self.from_frame, pose_arr).poses[0]
         torque_pose = Pose()
-        torque_pose.position.x = current_torque['x']
-        torque_pose.position.y = current_torque['y']
-        torque_pose.position.z = current_torque['z']
+        torque_pose.position.x = msg.wrench.torque.x
+        torque_pose.position.y = msg.wrench.torque.y
+        torque_pose.position.z = msg.wrench.torque.z
         torque_pose.orientation.x = 0
         torque_pose.orientation.y = 0
         torque_pose.orientation.z = 0
@@ -193,15 +191,15 @@ class MotionServices():
         return transformed_force_dict, transformed_torque_dict, transformed_current_arm_dict
 
     def forces_cb(self, msg):
-        self.current_force['x'] = msg.wrench.force.x
-        self.current_force['y'] = msg.wrench.force.y
-        self.current_force['z'] = msg.wrench.force.z
-        self.current_torque['x'] = msg.wrench.torque.x
-        self.current_torque['y'] = msg.wrench.torque.y
-        self.current_torque['z'] = msg.wrench.torque.z
-        self.current_arm['y'] = self.current_torque['y'] / (self.current_force['z'] + 1e-6)
+        # self.current_force['x'] = msg.wrench.force.x
+        # self.current_force['y'] = msg.wrench.force.y
+        # self.current_force['z'] = msg.wrench.force.z
+        # self.current_torque['x'] = msg.wrench.torque.x
+        # self.current_torque['y'] = msg.wrench.torque.y
+        # self.current_torque['z'] = msg.wrench.torque.z
+        # self.current_arm['y'] = self.current_torque['y'] / (self.current_force['z'] + 1e-6)
         if self.do_transform_force:
-            self.current_force, self.current_torque, self.current_arm = self.transform_force()
+            self.current_force, self.current_torque, self.current_arm = self.transform_force(msg)
             transformed_force_msg = WrenchStamped()
             transformed_force_msg.header.frame_id = self.to_frame
             transformed_force_msg.wrench.force.x = self.current_force['x']
@@ -231,10 +229,10 @@ class MotionServices():
                       avoid_collisions=True, eef_step=0.0001, jump_threshold=0.0, dist_thresh=None):
 
         # get the initial force
-        init_force = self.current_force[axis]
+        init_force = deepcopy(self.current_force[axis])
         current_force = init_force
         change_force = 0
-        # rospy.loginfo("initial_force = {}".format(init_force))
+        rospy.loginfo("initial_force = {}".format(init_force))
 
         # Reset goal status
         self.goal_status = -1
@@ -247,7 +245,7 @@ class MotionServices():
         while change_force < force_thresh and self.goal_status != 3:
             current_force = self.current_force[axis]
             change_force = fabs(current_force - init_force)
-            # rospy.loginfo("change in force = {}".format(change_force))
+            rospy.loginfo("change in force = {}".format(change_force))
 
         # rospy.loginfo("Initial Time")
         if self.goal_status != 3:
