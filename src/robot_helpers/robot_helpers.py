@@ -10,10 +10,12 @@ from moveit_commander import MoveGroupCommander
 from moveit_msgs.msg import RobotTrajectory
 from std_msgs.msg import Float64
 from math import fabs
-from tf.transformations import quaternion_from_euler, euler_from_quaternion
+from tf.transformations import quaternion_from_euler, euler_from_quaternion, quaternion_multiply
 from abb_robot_msgs.srv import SetIOSignal, SetIOSignalRequest
 from moveit_msgs.msg import ExecuteTrajectoryActionResult
 from copy import deepcopy
+from trac_ik_python.trac_ik import IK
+from moveit_msgs.msg import OrientationConstraint, Constraints, JointConstraint, PositionConstraint
 
 
 def sample_from_func(func, start, stop, number_of_points):
@@ -123,6 +125,8 @@ class MotionServices():
         self.trigger_stop = False
         self.force_thresh = 0
         self.axis = 'z' if self.do_transform_force else 'xy'
+        self.constraints_dict = {}
+        self.get_constraints_dict()
         # rospy.Subscriber("ft_sensor_wrench/resultant/filtered", Float64, self.force_xy_cb)
         # rospy.Subscriber("ft_sensor_wrench/filtered_z", Float64, self.forces_cb)
         rospy.Subscriber("ft_sensor_wrench/resultant/filtered/xy",
@@ -135,17 +139,107 @@ class MotionServices():
                          WrenchStamped, self.forces_cb)
         rospy.Subscriber("/execute_trajectory/result", ExecuteTrajectoryActionResult, self.goal_status_cb)
         self.goal_status = None
+    
+    def get_constraints_dict(self):
+        constraints = rospy.get_param(
+            "/generate_state_database/constraints/constraints")
+        constraints_name = rospy.get_param(
+            "/generate_state_database/constraints/name")
+        if len(constraints) > 0:
+            all_constr = Constraints()
+            all_constr.name = constraints_name
+            self.constraints_dict[constraints_name] = all_constr
+            for constr_str in constraints:
+                if constr_str['type'] == 'orientation':
+                    constr = OrientationConstraint()
+                    quat = quaternion_from_euler(constr_str['orientation'][0],
+                                                 constr_str['orientation'][1],
+                                                 constr_str['orientation'][2], axes='sxyz')
+                    constr.orientation.x = quat[0]
+                    constr.orientation.y = quat[1]
+                    constr.orientation.z = quat[2]
+                    constr.orientation.w = quat[3]
+
+                if constr_str['type'] == 'position':
+                    constr = PositionConstraint()
+                    constr.position.x = constr_str['position'][0]
+                    constr.position.y = constr_str['position'][1]
+                    constr.position.z = constr_str['position'][2]
+
+                if constr_str['type'] in ['position', 'orientation']:
+                    constr.absolute_x_axis_tolerance = constr_str['tolerances'][0]
+                    constr.absolute_y_axis_tolerance = constr_str['tolerances'][1]
+                    constr.absolute_z_axis_tolerance = constr_str['tolerances'][2]
+
+                if constr_str['type'] == 'joint':
+                    constr = JointConstraint()
+                    constr.position = constr_str['position']
+                    constr.tolerance_above = constr_str['tolerance_above']
+                    constr.tolerance_below = constr_str['tolerance_below']
+
+                constr.link_name = constr_str['link_name']
+                constr.header.frame_id = constr_str['frame_id']
+                constr.weight = constr_str['weight']
+                constr_type_list = getattr(
+                    all_constr, constr_str['type'] + '_constraints')
+                constr_type_list.append(constr)
+        
+    def pose_goal(self, pose,
+                  ref_frame="base_link",
+                  tool_frame="gripper_tip_link",
+                  position_shift=(0,0,0),
+                  tol_pos=(0.01, 0.01, 0.01),
+                  tol_ori=(0.1, 0.1, 6.28),
+                  joint_goal=False,
+                  approximated=False,
+                  constraints_name=None):
+        success = False
+        while not success and not rospy.is_shutdown():
+            self.move_group.set_pose_reference_frame(ref_frame)
+            self.ts.create_frame_at_pose(pose, ref_frame, "rotate_to_frame")
+            if constraints_name is not None:
+                constr = self.constraints_dict[constraints_name]
+                constr.orientation_constraints[0].orientation = pose.orientation
+                constr.orientation_constraints[0].link_name = tool_frame
+                self.move_group.set_path_constraints(constr)
+                print("Setting constraints: {}".format(constraints_name))
+            if joint_goal:
+                ik_solver = IK("base_link",
+                            "gripper_tip_link")
+
+                seed_state = [0.0] * ik_solver.number_of_joints
+                result = ik_solver.get_ik(seed_state,
+                                        pose.position.x, pose.position.y, pose.position.z,  # X, Y, Z
+                                        pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w,
+                                          bx=tol_pos[0], by=tol_pos[1], bz=tol_pos[2],
+                                          brx=tol_ori[0], bry=tol_ori[1], brz=tol_ori[2])  # QX, QY, QZ, QW
+                self.move_group.set_joint_value_target(result)
+            else:
+                self.move_group.set_pose_target(pose)
+            success = self.move_group.go(wait=True)
+            self.move_group.stop()
+            self.move_group.clear_pose_targets()
+            self.move_group.clear_path_constraints()
+            if not success:
+                rospy.sleep(1)
+        return success
 
     def move_straight(self, poses, ref_frame="base_link",
                       vel_scale=0.005, acc_scale=0.005,
                       avoid_collisions=True, eef_step=0.0001, jump_threshold=0.0,
-                      wait_execution=True):
+                      wait_execution=True, retry_with_large_step=False):
         # set the pose_arr
         self.move_group.set_pose_reference_frame(ref_frame)
-
-        plan, fraction = self.move_group.compute_cartesian_path(
-            poses.poses, eef_step, jump_threshold, avoid_collisions)
-        print(fraction)
+        fraction = 0.0
+        while fraction < 0.99:
+            plan, fraction = self.move_group.compute_cartesian_path(
+                poses.poses, eef_step, jump_threshold, avoid_collisions)
+            if fraction < 0.99 and retry_with_large_step:
+                eef_step += 0.01
+                print("retrying with eef_step: ", eef_step)
+            else:
+                break
+            print(fraction)
 
         # filter the output plan 
         filtered_plan = filter_plan(plan)
@@ -259,7 +353,7 @@ class MotionServices():
             poses, vel_scale=vel_scale, acc_scale=acc_scale, wait_execution=False, ref_frame=ref_frame)
 
         # Monitor the force until it reaches force_thresh.
-        while change_force < force_thresh and self.goal_status != 3:
+        while change_force < force_thresh and self.goal_status != 3 and not rospy.is_shutdown():
             current_force = self.current_force[axis]
             change_force = fabs(current_force - init_force)
             # rospy.loginfo("change in force = {}".format(change_force))
@@ -315,7 +409,6 @@ class MotionServices():
             print("couldn't insert the Ethernet")
             return
     
-
     def shift_pose_by(self, tf_services, ref_frame, moving_frame, new_frame="new_frame", trans=(0, 0, 0), rot=(0, 0, 0)):
         pose_array = PoseArray()
         tf_services.create_frame(ref_frame, moving_frame, new_frame)
